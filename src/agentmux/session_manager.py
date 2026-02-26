@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Coroutine
+from typing import Any
 
 from agentmux.models import (
     AgentmuxConfig,
+    Notification,
+    NotificationType,
     Session,
     SessionMode,
     SessionStatus,
@@ -15,7 +18,9 @@ from agentmux.models import (
     StreamEvent,
 )
 from agentmux.providers import get_provider
-from agentmux.question_detector import detect_question
+from agentmux.question_detector import detect_question, extract_question
+
+NotifyCallback = Callable[[Notification], Coroutine[Any, Any, None]]
 
 
 def _gen_id() -> str:
@@ -31,6 +36,20 @@ class SessionManager:
         self._sessions: dict[str, Session] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._queues: dict[str, asyncio.Queue[StreamEvent]] = {}
+        self._timeout_tasks: dict[str, asyncio.Task[None]] = {}
+        self._listeners: list[NotifyCallback] = []
+
+    def on_notify(self, callback: NotifyCallback) -> None:
+        """Register a callback for session notifications."""
+        self._listeners.append(callback)
+
+    async def _emit(self, notification: Notification) -> None:
+        """Emit a notification to all listeners."""
+        import contextlib
+
+        for listener in self._listeners:
+            with contextlib.suppress(Exception):
+                await listener(notification)
 
     async def create(
         self,
@@ -56,6 +75,12 @@ class SessionManager:
 
         task = asyncio.create_task(self._run_session(session))
         self._tasks[session_id] = task
+
+        await self._emit(Notification(
+            type=NotificationType.SESSION_STARTED,
+            session_id=session_id,
+            message=f"Session {session_id} started ({provider_name}): {prompt[:60]}",
+        ))
 
         return session
 
@@ -85,16 +110,82 @@ class SessionManager:
 
                 if event.text and detect_question(event.text):
                     session.status = SessionStatus.WAITING
+                    question = extract_question(event.text)
+                    await self._emit(Notification(
+                        type=NotificationType.QUESTION_DETECTED,
+                        session_id=session.id,
+                        message=question,
+                    ))
+                    self._start_question_timeout(session.id)
 
                 if event.is_final:
-                    session.status = SessionStatus.COMPLETED
+                    if session.status != SessionStatus.WAITING:
+                        # Fallback: check accumulated output for questions
+                        # that per-event detection missed (streaming chunks
+                        # rarely end with '?' on their own).
+                        full_output = "\n".join(session.output_lines)
+                        if detect_question(full_output):
+                            session.status = SessionStatus.WAITING
+                            question = extract_question(full_output)
+                            await self._emit(Notification(
+                                type=NotificationType.QUESTION_DETECTED,
+                                session_id=session.id,
+                                message=question,
+                            ))
+                            self._start_question_timeout(session.id)
+                        else:
+                            session.status = SessionStatus.COMPLETED
 
             if session.status == SessionStatus.RUNNING:
                 session.status = SessionStatus.COMPLETED
+
+            if session.status == SessionStatus.COMPLETED:
+                await self._emit(Notification(
+                    type=NotificationType.SESSION_COMPLETED,
+                    session_id=session.id,
+                    message=f"Session {session.id} completed.",
+                ))
         except asyncio.CancelledError:
             session.status = SessionStatus.CANCELLED
         except Exception:
             session.status = SessionStatus.FAILED
+            await self._emit(Notification(
+                type=NotificationType.SESSION_FAILED,
+                session_id=session.id,
+                message=f"Session {session.id} failed.",
+            ))
+
+    def _start_question_timeout(self, session_id: str) -> None:
+        """Start a timeout timer for an unanswered question."""
+        old = self._timeout_tasks.pop(session_id, None)
+        if old and not old.done():
+            old.cancel()
+
+        timeout = self.config.question_timeout
+        if timeout <= 0:
+            return
+
+        async def _timeout() -> None:
+            await asyncio.sleep(timeout)
+            session = self._sessions.get(session_id)
+            if session and session.status == SessionStatus.WAITING:
+                session.status = SessionStatus.CANCELLED
+                task = self._tasks.get(session_id)
+                if task and not task.done():
+                    task.cancel()
+                await self._emit(Notification(
+                    type=NotificationType.QUESTION_TIMEOUT,
+                    session_id=session_id,
+                    message=f"Session {session_id} timed out waiting for answer.",
+                ))
+
+        self._timeout_tasks[session_id] = asyncio.create_task(_timeout())
+
+    def _cancel_question_timeout(self, session_id: str) -> None:
+        """Cancel any pending question timeout."""
+        task = self._timeout_tasks.pop(session_id, None)
+        if task and not task.done():
+            task.cancel()
 
     async def send_input(self, session_id: str, user_input: str) -> Session:
         """Answer a question by resuming the session with new input."""
@@ -102,6 +193,7 @@ class SessionManager:
         if session is None:
             raise KeyError(f"Session {session_id!r} not found")
 
+        self._cancel_question_timeout(session_id)
         session.status = SessionStatus.RUNNING
         session.prompt = user_input
 
@@ -152,6 +244,8 @@ class SessionManager:
         if session is None:
             raise KeyError(f"Session {session_id!r} not found")
 
+        self._cancel_question_timeout(session_id)
+
         task = self._tasks.get(session_id)
         if task and not task.done():
             task.cancel()
@@ -162,6 +256,11 @@ class SessionManager:
             await provider.cancel(session.pid)
 
         session.status = SessionStatus.CANCELLED
+        await self._emit(Notification(
+            type=NotificationType.SESSION_CANCELLED,
+            session_id=session_id,
+            message=f"Session {session_id} cancelled.",
+        ))
 
     async def stream(self, session_id: str) -> AsyncIterator[StreamEvent]:
         """Yield stream events for a session."""
@@ -181,9 +280,20 @@ class SessionManager:
                     SessionStatus.COMPLETED,
                     SessionStatus.FAILED,
                     SessionStatus.CANCELLED,
+                    SessionStatus.WAITING,
                 ):
                     break
 
     def get_session(self, session_id: str) -> Session | None:
         """Get a session by ID."""
         return self._sessions.get(session_id)
+
+    def get_notifications_queue(self) -> asyncio.Queue[Notification]:
+        """Create and return a queue that receives all notifications."""
+        queue: asyncio.Queue[Notification] = asyncio.Queue()
+
+        async def _forward(n: Notification) -> None:
+            await queue.put(n)
+
+        self._listeners.append(_forward)
+        return queue

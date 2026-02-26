@@ -79,6 +79,25 @@ class SessionSummary:
     created_at: float
 
 
+class NotificationType(StrEnum):
+    SESSION_STARTED = "session_started"
+    SESSION_COMPLETED = "session_completed"
+    SESSION_FAILED = "session_failed"
+    SESSION_CANCELLED = "session_cancelled"
+    QUESTION_DETECTED = "question_detected"
+    QUESTION_TIMEOUT = "question_timeout"
+
+
+@dataclass
+class Notification:
+    """A notification about a session event."""
+
+    type: NotificationType
+    session_id: str
+    message: str
+    created_at: float = field(default_factory=time.time)
+
+
 @dataclass
 class AgentmuxConfig:
     """Top-level configuration."""
@@ -87,3 +106,4 @@ class AgentmuxConfig:
     working_dir: str = field(default_factory=lambda: os.getcwd())
     providers: dict[str, dict[str, Any]] = field(default_factory=dict)
     aliases: dict[str, str] = field(default_factory=dict)
+    question_timeout: float = 300.0  # seconds before unanswered question times out

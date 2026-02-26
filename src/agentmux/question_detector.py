@@ -22,6 +22,10 @@ _CHOICE_KEYWORDS = re.compile(
 
 _NUMBERED_LIST = re.compile(r"^\s*\d+[.)]\s+", re.MULTILINE)
 
+# Matches '?' followed by optional markdown closers, then whitespace or end of string.
+# Handles: "question?", "**question?**", "question?\nMore", "question?** More text".
+_QUESTION_MARK = re.compile(r"\?[*_`\]\)]*(?:\s|$)")
+
 
 def detect_question(text: str) -> bool:
     """Return True if the text likely contains a question needing user input."""
@@ -32,7 +36,7 @@ def detect_question(text: str) -> bool:
         if pattern.search(text):
             return True
 
-    if text.rstrip().endswith("?"):
+    if _QUESTION_MARK.search(text):
         return True
 
     return bool(_NUMBERED_LIST.search(text) and _CHOICE_KEYWORDS.search(text))
@@ -49,7 +53,7 @@ def extract_question(text: str) -> str:
         return ""
 
     for line in reversed(lines):
-        if line.endswith("?"):
+        if _QUESTION_MARK.search(line):
             return line
 
     for line in reversed(lines):

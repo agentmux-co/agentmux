@@ -10,6 +10,28 @@ class TestQuestionMark:
     def test_not_a_question(self):
         assert detect_question("I fixed the bug in auth.py") is False
 
+    def test_question_on_internal_line(self):
+        text = (
+            "Let me ask 3 questions:\n"
+            "1. What feature do you want to add?\n"
+            "2. Where should it live?\n"
+            "Take your time."
+        )
+        assert detect_question(text) is True
+
+    def test_question_in_markdown_bold(self):
+        text = (
+            "Sure! I need to know:\n"
+            "\n"
+            "**What feature do you want to add?**\n"
+            "\n"
+            "Give me a brief description."
+        )
+        assert detect_question(text) is True
+
+    def test_question_in_markdown_italic(self):
+        assert detect_question("*What do you think?*") is True
+
 
 class TestNumberedLists:
     def test_numbered_list_with_choice_keyword(self):

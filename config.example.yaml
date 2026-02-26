@@ -3,6 +3,10 @@
 
 default_provider: claude
 
+# Timeout (seconds) before unanswered agent questions auto-cancel the session.
+# Set to 0 to disable.
+question_timeout: 300
+
 providers:
   claude:
     command: claude
@@ -11,6 +15,17 @@ providers:
     skip_permissions: true
     # api_key: ${ANTHROPIC_API_KEY}
 
+  ollama:
+    base_url: http://localhost:11434
+    model: codellama
+    system_prompt: "You are a helpful coding assistant."
+
+  codex:
+    command: codex
+    approval_mode: auto-edit
+
 aliases:
   cc: claude
   c: claude
+  ol: ollama
+  cx: codex

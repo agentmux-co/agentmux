@@ -77,4 +77,5 @@ def load_config(path: str | None = None) -> AgentmuxConfig:
         working_dir=raw.get("working_dir", os.getcwd()),
         providers=raw.get("providers", {}),
         aliases=raw.get("aliases", {}),
+        question_timeout=float(raw.get("question_timeout", 300.0)),
     )

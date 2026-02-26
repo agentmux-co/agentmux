@@ -6,7 +6,8 @@ from mcp.server.fastmcp import FastMCP
 
 from agentmux.config import load_config
 from agentmux.formatters.plain import format_session_list, format_session_output
-from agentmux.models import AgentmuxConfig, RouteAction
+from agentmux.models import AgentmuxConfig, RouteAction, SessionStatus
+from agentmux.providers import list_providers
 from agentmux.router import parse
 from agentmux.session_manager import SessionManager
 
@@ -66,10 +67,33 @@ async def route(message: str, working_dir: str = "") -> str:
             mode=cmd.mode,
             working_dir=working_dir or config.working_dir,
         )
-        mode_label = "foreground" if cmd.mode.value == "fg" else "background"
+
+        # Wait for the session to produce output, then return it
+        _CONTENT_TYPES = {"assistant", "text_delta"}
+        output_parts: list[str] = []
+
+        async for event in manager.stream(session.id):
+            if event.text and event.type in _CONTENT_TYPES:
+                output_parts.append(event.text)
+
+        final = manager.get_session(session.id)
+        status = final.status if final else SessionStatus.FAILED
+        output = "".join(output_parts)
+
+        if status == SessionStatus.WAITING:
+            return (
+                f"{output}\n\n"
+                f"[Session {session.id} is waiting for your answer. "
+                f"Use session_input(session_id='{session.id}', "
+                f"user_input='...') to respond.]"
+            )
+
+        if status == SessionStatus.COMPLETED:
+            return output or f"Session {session.id} completed (no text output)."
+
         return (
-            f"Session {session.id} started ({cmd.provider}, {mode_label}).\n"
-            f"Prompt: {cmd.prompt[:80]}"
+            f"{output}\n\n"
+            f"[Session {session.id} ended with status: {status.value}]"
         )
 
     return f"Unknown action: {cmd.action}"
@@ -88,7 +112,14 @@ async def session_input(session_id: str, user_input: str) -> str:
 
 @_mcp.tool()
 async def session_control(action: str, session_id: str = "") -> str:
-    """Control a session: status, kill, fg (foreground), bg (background)."""
+    """Control a session: status, kill, fg (foreground), bg (background).
+
+    Actions:
+      - status: list all sessions
+      - kill: terminate a session (requires session_id)
+      - fg/foreground: switch session to foreground mode
+      - bg/background: switch session to background mode
+    """
     manager = _get_manager()
 
     if action == "status":
@@ -123,6 +154,13 @@ async def session_control(action: str, session_id: str = "") -> str:
             return str(e)
 
     return f"Unknown action: {action!r}. Use: status, kill, fg, bg"
+
+
+@_mcp.tool()
+async def providers() -> str:
+    """List all available agent providers."""
+    names = list_providers()
+    return "Available providers: " + ", ".join(names)
 
 
 @_mcp.resource("sessions://list")
