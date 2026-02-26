@@ -1,0 +1,16 @@
+# agentmux configuration
+# Copy to ./agentmux.yaml or ~/.config/agentmux/config.yaml
+
+default_provider: claude
+
+providers:
+  claude:
+    command: claude
+    args:
+      - "-p"
+    skip_permissions: true
+    # api_key: ${ANTHROPIC_API_KEY}
+
+aliases:
+  cc: claude
+  c: claude
